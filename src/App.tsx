@@ -25,10 +25,14 @@ import {
 import {
   ETSY_VIDEO_MAX_SEC,
   ETSY_VIDEO_MIN_SEC,
+  ETSY_VIDEO_TARGET_SEC,
   exportEtsyListingVideo,
   videoFileExtension,
   type VideoSlideSource,
 } from './lib/video'
+
+/** Clip id in the listing video timeline: cover sheet or a mockup by PNG name. */
+type VideoClipId = 'cover' | `mockup:${string}`
 import {
   closeBitmaps,
   drawPackedItem,
@@ -226,6 +230,11 @@ function App() {
   const [exportingMockup, setExportingMockup] = useState(false)
   const [exportingVideo, setExportingVideo] = useState(false)
   const [videoProgress, setVideoProgress] = useState(0)
+  const [videoDurationSec, setVideoDurationSec] = useState(ETSY_VIDEO_TARGET_SEC)
+  const [videoOrder, setVideoOrder] = useState<VideoClipId[]>(['cover'])
+  const [exportOpen, setExportOpen] = useState(false)
+  const exportCloseRef = useRef<HTMLButtonElement>(null)
+  const exportTitleId = useId()
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
 
@@ -1345,32 +1354,93 @@ function App() {
     }
   }
 
-  /** Cover first, then each tagged mockup — Etsy listing video (3–15s). */
+  // Export modal: Escape to close, focus close control on open
+  useEffect(() => {
+    if (!exportOpen) return
+    exportCloseRef.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (exporting || exportingVideo) return
+      e.preventDefault()
+      setExportOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [exportOpen, exporting, exportingVideo])
+
+  // Keep video clip list in sync with cover + available mockups
+  useEffect(() => {
+    setVideoOrder((prev) => {
+      const valid = new Set<VideoClipId>()
+      if (items.length > 0) valid.add('cover')
+      if (mockupBg) {
+        for (const l of mockupLayers) valid.add(`mockup:${l.name}`)
+      }
+      const kept = prev.filter((id) => valid.has(id))
+      for (const id of valid) {
+        if (!kept.includes(id)) {
+          if (id === 'cover') kept.unshift(id)
+          else kept.push(id)
+        }
+      }
+      return kept
+    })
+  }, [items.length, mockupBg, mockupLayers])
+
+  const moveVideoClip = (index: number, dir: -1 | 1) => {
+    setVideoOrder((prev) => {
+      const j = index + dir
+      if (j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[index], next[j]] = [next[j], next[index]]
+      return next
+    })
+  }
+
+  const videoClipLabel = (id: VideoClipId) => {
+    if (id === 'cover') return 'Cover sheet'
+    return id.slice('mockup:'.length)
+  }
+
+  /** Ordered slides (user-controlled) — Etsy listing video (3–15s). */
   const downloadListingVideo = async () => {
-    if (items.length === 0) {
-      setError('Load PNGs and build a cover before making a video.')
+    if (videoOrder.length === 0) {
+      setError('Add a cover or mockups before making a video.')
       return
     }
     setExportingVideo(true)
     setVideoProgress(0)
     setError(null)
     try {
-      const slides: VideoSlideSource[] = [
-        {
-          kind: 'cover',
-          width: canvasWidth,
-          height: canvasHeight,
-          background,
-          items,
-        },
-      ]
-      if (mockupBg && mockupLayers.length > 0) {
-        for (const layer of mockupLayers) {
-          slides.push({ kind: 'mockup', bg: mockupBg, layer })
+      const slides: VideoSlideSource[] = []
+      for (const id of videoOrder) {
+        if (id === 'cover') {
+          if (items.length === 0) continue
+          slides.push({
+            kind: 'cover',
+            width: canvasWidth,
+            height: canvasHeight,
+            background,
+            items,
+          })
+          continue
         }
+        const name = id.slice('mockup:'.length)
+        const layer = mockupLayers.find((l) => l.name === name)
+        if (!mockupBg || !layer) continue
+        slides.push({ kind: 'mockup', bg: mockupBg, layer })
+      }
+      if (slides.length === 0) {
+        throw new Error('No slides available for the video.')
       }
 
       const { blob, mimeType } = await exportEtsyListingVideo(slides, {
+        totalSec: videoDurationSec,
         onProgress: setVideoProgress,
       })
       const ext = videoFileExtension(mimeType)
@@ -2098,84 +2168,15 @@ function App() {
             </section>
           )}
 
-          <section className="block export-block">
-            <h2>Export for Etsy</h2>
-            <div className="presets mode-toggle" role="group" aria-label="Export format">
-              <button
-                type="button"
-                className={`chip${exportFormat === 'image/jpeg' ? ' is-active' : ''}`}
-                onClick={() => setExportFormat('image/jpeg')}
-              >
-                JPG (recommended)
-              </button>
-              <button
-                type="button"
-                className={`chip${exportFormat === 'image/png' ? ' is-active' : ''}`}
-                onClick={() => setExportFormat('image/png')}
-              >
-                PNG
-              </button>
-            </div>
-            {exportFormat === 'image/jpeg' && (
-              <label className="field field-stack">
-                <span className="field-row">
-                  Quality <em>{Math.round(exportQuality * 100)}%</em>
-                </span>
-                <input
-                  type="range"
-                  min={60}
-                  max={95}
-                  step={1}
-                  value={Math.round(exportQuality * 100)}
-                  onChange={(e) =>
-                    setExportQuality(Number(e.target.value) / 100)
-                  }
-                />
-              </label>
-            )}
-            <p className="hint">
-              JPG stays smaller for uploads. If the file is over 1&nbsp;MB, quality
-              is auto-reduced.
-            </p>
+          <div className="export-launch">
             <button
               type="button"
               className="btn btn-export"
-              disabled={items.length === 0 || exporting || exportingVideo}
-              onClick={() => void download()}
+              disabled={items.length === 0}
+              onClick={() => setExportOpen(true)}
             >
-              {exporting ? (
-                <>
-                  <span className="spinner" aria-hidden="true" />
-                  Exporting…
-                </>
-              ) : (
-                `Download Etsy cover (${exportFormat === 'image/jpeg' ? 'JPG' : 'PNG'})`
-              )}
+              Export for Etsy…
             </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              style={{ width: '100%', marginTop: '0.55rem' }}
-              disabled={items.length === 0 || exporting || exportingVideo}
-              onClick={() => void downloadListingVideo()}
-            >
-              {exportingVideo ? (
-                <>
-                  <span className="spinner" aria-hidden="true" />
-                  Making video… {Math.round(videoProgress * 100)}%
-                </>
-              ) : (
-                'Download listing video'
-              )}
-            </button>
-            <p className="hint" style={{ marginTop: '0.55rem' }}>
-              Video is {ETSY_VIDEO_MIN_SEC}–{ETSY_VIDEO_MAX_SEC}s (Etsy limit):
-              cover first
-              {mockupLayers.length > 0
-                ? `, then ${mockupLayers.length} mockup${mockupLayers.length === 1 ? '' : 's'}`
-                : ' (tag PNGs + upload a mockup photo to include lifestyle shots)'}
-              . Ideal ≥1080px · MP4 when your browser supports it.
-            </p>
             {items.length > 0 && (
               <p className="meta" aria-live="polite">
                 {canvasWidth}×{canvasHeight} · {items.length} PNGs
@@ -2185,7 +2186,7 @@ function App() {
                   : ''}
               </p>
             )}
-          </section>
+          </div>
         </aside>
 
         <main className="stage" aria-label="Preview">
@@ -2368,6 +2369,208 @@ function App() {
           )}
         </main>
       </div>
+
+      {exportOpen && (
+        <div
+          className="modal-root"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !exporting && !exportingVideo) {
+              setExportOpen(false)
+            }
+          }}
+        >
+          <div
+            className="modal-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={exportTitleId}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="modal-head">
+              <h2 id={exportTitleId}>Export for Etsy</h2>
+              <button
+                ref={exportCloseRef}
+                type="button"
+                className="btn btn-ghost btn-compact modal-close"
+                onClick={() => setExportOpen(false)}
+                disabled={exporting || exportingVideo}
+                aria-label="Close export"
+              >
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <section className="modal-section" aria-label="Cover image">
+                <h3>Cover image</h3>
+                <div
+                  className="presets mode-toggle"
+                  role="group"
+                  aria-label="Export format"
+                >
+                  <button
+                    type="button"
+                    className={`chip${exportFormat === 'image/jpeg' ? ' is-active' : ''}`}
+                    onClick={() => setExportFormat('image/jpeg')}
+                  >
+                    JPG (recommended)
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip${exportFormat === 'image/png' ? ' is-active' : ''}`}
+                    onClick={() => setExportFormat('image/png')}
+                  >
+                    PNG
+                  </button>
+                </div>
+                {exportFormat === 'image/jpeg' && (
+                  <label className="field field-stack">
+                    <span className="field-row">
+                      Quality <em>{Math.round(exportQuality * 100)}%</em>
+                    </span>
+                    <input
+                      type="range"
+                      min={60}
+                      max={95}
+                      step={1}
+                      value={Math.round(exportQuality * 100)}
+                      onChange={(e) =>
+                        setExportQuality(Number(e.target.value) / 100)
+                      }
+                    />
+                  </label>
+                )}
+                <p className="hint">
+                  JPG stays smaller for uploads. If the file is over 1&nbsp;MB,
+                  quality is auto-reduced.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-export"
+                  disabled={items.length === 0 || exporting || exportingVideo}
+                  onClick={() => void download()}
+                >
+                  {exporting ? (
+                    <>
+                      <span className="spinner" aria-hidden="true" />
+                      Exporting…
+                    </>
+                  ) : (
+                    `Download Etsy cover (${exportFormat === 'image/jpeg' ? 'JPG' : 'PNG'})`
+                  )}
+                </button>
+              </section>
+
+              <section className="modal-section" aria-label="Listing video">
+                <h3>Listing video</h3>
+                {videoOrder.length > 0 ? (
+                  <div className="video-controls">
+                    <label className="field field-stack">
+                      <span className="field-row">
+                        Video length{' '}
+                        <em>
+                          {videoDurationSec}s
+                          {videoOrder.length > 0
+                            ? ` · ~${(videoDurationSec / videoOrder.length).toFixed(1)}s / shot`
+                            : ''}
+                        </em>
+                      </span>
+                      <input
+                        type="range"
+                        min={ETSY_VIDEO_MIN_SEC}
+                        max={ETSY_VIDEO_MAX_SEC}
+                        step={1}
+                        value={videoDurationSec}
+                        onChange={(e) =>
+                          setVideoDurationSec(Number(e.target.value))
+                        }
+                        aria-label="Listing video duration in seconds"
+                      />
+                    </label>
+                    <p className="hint">
+                      Etsy allows {ETSY_VIDEO_MIN_SEC}–{ETSY_VIDEO_MAX_SEC}s.
+                      Reorder shots with the arrows (cover + mockups).
+                    </p>
+                    <ol className="video-order" aria-label="Video shot order">
+                      {videoOrder.map((id, index) => (
+                        <li key={id} className="video-order-row">
+                          <span className="video-order-index">{index + 1}</span>
+                          <span
+                            className="video-order-label"
+                            title={videoClipLabel(id)}
+                          >
+                            {id === 'cover' ? (
+                              <strong>Cover sheet</strong>
+                            ) : (
+                              <>
+                                <span className="video-order-kind">Mockup</span>{' '}
+                                {videoClipLabel(id)}
+                              </>
+                            )}
+                          </span>
+                          <div className="video-order-actions">
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-compact"
+                              disabled={index === 0 || exportingVideo}
+                              onClick={() => moveVideoClip(index, -1)}
+                              aria-label={`Move ${videoClipLabel(id)} earlier`}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-compact"
+                              disabled={
+                                index === videoOrder.length - 1 ||
+                                exportingVideo
+                              }
+                              onClick={() => moveVideoClip(index, 1)}
+                              aria-label={`Move ${videoClipLabel(id)} later`}
+                            >
+                              ↓
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                ) : (
+                  <p className="hint">
+                    Build a cover (and optionally tag mockups) to include shots
+                    in the video.
+                  </p>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: '100%', marginTop: '0.55rem' }}
+                  disabled={
+                    videoOrder.length === 0 || exporting || exportingVideo
+                  }
+                  onClick={() => void downloadListingVideo()}
+                >
+                  {exportingVideo ? (
+                    <>
+                      <span className="spinner" aria-hidden="true" />
+                      Making video… {Math.round(videoProgress * 100)}%
+                    </>
+                  ) : (
+                    'Download listing video'
+                  )}
+                </button>
+                <p className="hint" style={{ marginTop: '0.55rem' }}>
+                  Ideal ≥1080px · MP4 when your browser supports it
+                  {mockupLayers.length === 0
+                    ? ' · tag PNGs + upload a mockup photo to add lifestyle shots'
+                    : ''}
+                  .
+                </p>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -108,7 +108,7 @@ function renderSlideToCanvas(
   return canvas
 }
 
-/** Split total duration across cover (first, longer) + mockups. */
+/** Split total duration evenly across slides (order is caller-controlled). */
 export function slideDurationsMs(
   slideCount: number,
   totalSec = ETSY_VIDEO_TARGET_SEC,
@@ -122,14 +122,9 @@ export function slideDurationsMs(
 
   if (n === 1) return [totalMs]
 
-  // Cover gets ~35% (min 2.2s), rest split evenly among mockups
-  const coverMs = Math.max(2200, Math.round(totalMs * 0.35))
-  const rest = totalMs - coverMs
-  const each = Math.max(1000, Math.floor(rest / (n - 1)))
-  const durations = [coverMs, ...Array.from({ length: n - 1 }, () => each)]
-  // Trim last to hit total exactly
-  const sum = durations.reduce((a, b) => a + b, 0)
-  durations[durations.length - 1] += totalMs - sum
+  const each = Math.floor(totalMs / n)
+  const durations = Array.from({ length: n }, () => each)
+  durations[durations.length - 1] += totalMs - each * n
   return durations
 }
 
@@ -146,7 +141,7 @@ export function pickOutputSize(
 }
 
 /**
- * Record an Etsy listing video: cover first, then each mockup.
+ * Record an Etsy listing video from ordered slides.
  * Uses MediaRecorder (MP4 when the browser supports it, else WebM).
  */
 export async function exportEtsyListingVideo(
