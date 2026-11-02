@@ -23,6 +23,13 @@ import {
   saveDefaultMockup,
 } from './lib/mockupStore'
 import {
+  ETSY_VIDEO_MAX_SEC,
+  ETSY_VIDEO_MIN_SEC,
+  exportEtsyListingVideo,
+  videoFileExtension,
+  type VideoSlideSource,
+} from './lib/video'
+import {
   closeBitmaps,
   drawPackedItem,
   isBitmapLive,
@@ -217,6 +224,8 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportingMockup, setExportingMockup] = useState(false)
+  const [exportingVideo, setExportingVideo] = useState(false)
+  const [videoProgress, setVideoProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
 
@@ -1336,6 +1345,44 @@ function App() {
     }
   }
 
+  /** Cover first, then each tagged mockup — Etsy listing video (3–15s). */
+  const downloadListingVideo = async () => {
+    if (items.length === 0) {
+      setError('Load PNGs and build a cover before making a video.')
+      return
+    }
+    setExportingVideo(true)
+    setVideoProgress(0)
+    setError(null)
+    try {
+      const slides: VideoSlideSource[] = [
+        {
+          kind: 'cover',
+          width: canvasWidth,
+          height: canvasHeight,
+          background,
+          items,
+        },
+      ]
+      if (mockupBg && mockupLayers.length > 0) {
+        for (const layer of mockupLayers) {
+          slides.push({ kind: 'mockup', bg: mockupBg, layer })
+        }
+      }
+
+      const { blob, mimeType } = await exportEtsyListingVideo(slides, {
+        onProgress: setVideoProgress,
+      })
+      const ext = videoFileExtension(mimeType)
+      await downloadBlob(blob, `etsy-listing-video.${ext}`)
+      setVideoProgress(1)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Video export failed')
+    } finally {
+      setExportingVideo(false)
+    }
+  }
+
   const autoArrange = () => {
     if (sources.length === 0) return
     applyPack(sources, options)
@@ -2093,7 +2140,7 @@ function App() {
             <button
               type="button"
               className="btn btn-export"
-              disabled={items.length === 0 || exporting}
+              disabled={items.length === 0 || exporting || exportingVideo}
               onClick={() => void download()}
             >
               {exporting ? (
@@ -2105,6 +2152,30 @@ function App() {
                 `Download Etsy cover (${exportFormat === 'image/jpeg' ? 'JPG' : 'PNG'})`
               )}
             </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ width: '100%', marginTop: '0.55rem' }}
+              disabled={items.length === 0 || exporting || exportingVideo}
+              onClick={() => void downloadListingVideo()}
+            >
+              {exportingVideo ? (
+                <>
+                  <span className="spinner" aria-hidden="true" />
+                  Making video… {Math.round(videoProgress * 100)}%
+                </>
+              ) : (
+                'Download listing video'
+              )}
+            </button>
+            <p className="hint" style={{ marginTop: '0.55rem' }}>
+              Video is {ETSY_VIDEO_MIN_SEC}–{ETSY_VIDEO_MAX_SEC}s (Etsy limit):
+              cover first
+              {mockupLayers.length > 0
+                ? `, then ${mockupLayers.length} mockup${mockupLayers.length === 1 ? '' : 's'}`
+                : ' (tag PNGs + upload a mockup photo to include lifestyle shots)'}
+              . Ideal ≥1080px · MP4 when your browser supports it.
+            </p>
             {items.length > 0 && (
               <p className="meta" aria-live="polite">
                 {canvasWidth}×{canvasHeight} · {items.length} PNGs
