@@ -205,12 +205,18 @@ function packRows(
           height,
         })
       } else {
+        // Only flex gaps when the row is nearly full — otherwise left-align
+        // so a short last row doesn't leave huge empty gaps between stickers.
+        const filled = (rawW + minGaps) / innerW
+        const useFlex = filled >= 0.72
         let x = 0
-        const flexGap = gap + free / (sized.length - 1)
+        const stepGap = useFlex ? gap + free / (sized.length - 1) : gap
         for (let i = 0; i < sized.length; i++) {
           const it = sized[i]
           let width = it.width
-          if (i === sized.length - 1) width = Math.max(1, innerW - x)
+          if (useFlex && i === sized.length - 1) {
+            width = Math.max(1, innerW - x)
+          }
           items.push({
             name: it.src.name,
             bitmap: it.src.bitmap,
@@ -219,7 +225,7 @@ function packRows(
             width,
             height: it.height,
           })
-          x += width + flexGap
+          x += width + stepGap
         }
       }
 
@@ -298,7 +304,8 @@ function packRows(
 }
 
 /**
- * Uniform square-grid packer: every PNG gets the same cell size.
+ * Full-bleed grid packer: cells fill the entire inner canvas (no unused margins).
+ * PNGs are letterboxed inside equal cells via fitContain when drawn.
  */
 function packGrid(
   sources: SourceImage[],
@@ -316,24 +323,22 @@ function packGrid(
   const innerH = canvasHeight - margin * 2
   const n = sources.length
 
-  if (innerW <= 0 || innerH <= 0) return null
+  if (innerW <= 0 || innerH <= 0 || n < 1) return null
 
   let columns = 0
-  let cellSize = 0
 
   if (itemSizeOpt > 0) {
-    cellSize = itemSizeOpt
     if (columnsOpt > 0) {
       columns = Math.min(n, Math.max(1, Math.round(columnsOpt)))
     } else {
       columns = Math.max(
         1,
-        Math.min(n, Math.floor((innerW + gap) / (cellSize + gap))),
+        Math.min(n, Math.floor((innerW + gap) / (itemSizeOpt + gap))),
       )
     }
   } else {
-    let bestCols = 0
-    let bestCell = 0
+    let bestCols = 1
+    let bestScore = -1
     const candidates: number[] =
       columnsOpt > 0
         ? [Math.min(n, Math.max(1, Math.round(columnsOpt)))]
@@ -343,36 +348,48 @@ function packGrid(
       const rows = Math.ceil(n / cols)
       const cellW = (innerW - gap * (cols - 1)) / cols
       const cellH = (innerH - gap * (rows - 1)) / rows
+      if (cellW < 8 || cellH < 8) continue
       const cell = Math.min(cellW, cellH)
-      if (cell > bestCell) {
-        bestCell = cell
+      // Prefer fuller last rows so we don't leave a sparse strip of empties
+      const rem = n % cols
+      const fillBonus = rem === 0 ? cell * 0.12 : (rem / cols) * cell * 0.08
+      const score = cell + fillBonus
+      if (score > bestScore) {
+        bestScore = score
         bestCols = cols
       }
     }
-
-    if (bestCols < 1 || bestCell < 1) return null
     columns = bestCols
-    cellSize = bestCell
   }
 
-  if (columns < 1 || cellSize < 1) return null
+  if (columns < 1) return null
 
   const rows = Math.ceil(n / columns)
-  const gridW = columns * cellSize + gap * Math.max(0, columns - 1)
-  const gridH = rows * cellSize + gap * Math.max(0, rows - 1)
-  const originX = margin + Math.max(0, (innerW - gridW) / 2)
-  const originY = margin + Math.max(0, (innerH - gridH) / 2)
+  const cellW = (innerW - gap * Math.max(0, columns - 1)) / columns
+  const cellH = (innerH - gap * Math.max(0, rows - 1)) / rows
+  if (cellW < 1 || cellH < 1) return null
+
+  const cellSize = Math.min(cellW, cellH)
+  const originX = margin
+  const originY = margin
+  const rem = n % columns
+  const lastRowCount = rem === 0 ? columns : rem
 
   const items: PackedRect[] = sources.map((src, i) => {
     const col = i % columns
     const row = Math.floor(i / columns)
+    const isLastRow = row === rows - 1 && lastRowCount < columns
+    const colsInRow = isLastRow ? lastRowCount : columns
+    const rowCellW = isLastRow
+      ? (innerW - gap * Math.max(0, colsInRow - 1)) / colsInRow
+      : cellW
     return {
       name: src.name,
       bitmap: src.bitmap,
-      x: originX + col * (cellSize + gap),
-      y: originY + row * (cellSize + gap),
-      width: cellSize,
-      height: cellSize,
+      x: originX + col * (rowCellW + gap),
+      y: originY + row * (cellH + gap),
+      width: rowCellW,
+      height: cellH,
     }
   })
 
@@ -381,7 +398,7 @@ function packGrid(
     cellSize,
     columns,
     rows,
-    usedHeight: originY + gridH + margin,
+    usedHeight: canvasHeight,
     mode: 'grid',
     scale: cellSize,
   }
@@ -394,6 +411,142 @@ export function packImages(
   if (sources.length === 0) return null
   if (options.mode === 'grid') return packGrid(sources, options)
   return packRows(sources, options)
+}
+
+type Rect = { x: number; y: number; width: number; height: number }
+
+/**
+ * Place `others` in dense grids in the bands around a featured hero sticker.
+ * Each usable band (top / bottom / left / right) is filled edge-to-edge.
+ */
+export function packAroundFeatured(
+  others: SourceImage[],
+  options: PackOptions,
+  featured: Rect,
+): PackedRect[] {
+  if (others.length === 0) return []
+
+  const { canvasWidth, canvasHeight, gap, margin, background } = options
+  const inner: Rect = {
+    x: margin,
+    y: margin,
+    width: canvasWidth - margin * 2,
+    height: canvasHeight - margin * 2,
+  }
+  if (inner.width < 8 || inner.height < 8) return []
+
+  const obstacle: Rect = {
+    x: Math.max(inner.x, featured.x - gap / 2),
+    y: Math.max(inner.y, featured.y - gap / 2),
+    width: Math.min(
+      featured.width + gap,
+      inner.x + inner.width - Math.max(inner.x, featured.x - gap / 2),
+    ),
+    height: Math.min(
+      featured.height + gap,
+      inner.y + inner.height - Math.max(inner.y, featured.y - gap / 2),
+    ),
+  }
+
+  const minBand = 24
+  const candidates: Rect[] = [
+    {
+      // top
+      x: inner.x,
+      y: inner.y,
+      width: inner.width,
+      height: Math.max(0, obstacle.y - inner.y),
+    },
+    {
+      // bottom
+      x: inner.x,
+      y: obstacle.y + obstacle.height,
+      width: inner.width,
+      height: Math.max(
+        0,
+        inner.y + inner.height - (obstacle.y + obstacle.height),
+      ),
+    },
+    {
+      // left (middle band only)
+      x: inner.x,
+      y: obstacle.y,
+      width: Math.max(0, obstacle.x - inner.x),
+      height: obstacle.height,
+    },
+    {
+      // right (middle band only)
+      x: obstacle.x + obstacle.width,
+      y: obstacle.y,
+      width: Math.max(
+        0,
+        inner.x + inner.width - (obstacle.x + obstacle.width),
+      ),
+      height: obstacle.height,
+    },
+  ]
+
+  const bands = candidates.filter(
+    (b) => b.width >= minBand && b.height >= minBand,
+  )
+  if (bands.length === 0) return []
+
+  const areas = bands.map((b) => b.width * b.height)
+  const totalArea = areas.reduce((s, a) => s + a, 0)
+  const n = others.length
+
+  // Allocate counts proportional to area; largest remainder → exact sum n
+  const raw = areas.map((a) => (a / totalArea) * n)
+  const counts = raw.map((r) => Math.floor(r))
+  let assigned = counts.reduce((s, c) => s + c, 0)
+  const order = raw
+    .map((r, i) => ({ i, frac: r - Math.floor(r) }))
+    .sort((a, b) => b.frac - a.frac)
+  for (let k = 0; assigned < n && k < order.length; k++) {
+    counts[order[k].i]++
+    assigned++
+  }
+
+  const bandOpts = (band: Rect): PackOptions => ({
+    canvasWidth: Math.max(1, Math.round(band.width)),
+    canvasHeight: Math.max(1, Math.round(band.height)),
+    gap,
+    margin: 0,
+    background,
+    mode: 'grid',
+    columns: 0,
+    itemSize: 0,
+  })
+
+  const placed: PackedRect[] = []
+  let cursor = 0
+  for (let bi = 0; bi < bands.length; bi++) {
+    const count = counts[bi]
+    if (count <= 0) continue
+    const slice = others.slice(cursor, cursor + count)
+    cursor += count
+    const band = bands[bi]
+    const packed = packGrid(slice, bandOpts(band))
+    if (!packed) continue
+    for (const it of packed.items) {
+      const width = Math.max(1, Math.round(it.width))
+      const height = Math.max(1, Math.round(it.height))
+      let x = Math.round(band.x + it.x)
+      let y = Math.round(band.y + it.y)
+      // Keep every sticker fully inside the canvas (no edge cropping)
+      x = Math.max(0, Math.min(x, canvasWidth - width))
+      y = Math.max(0, Math.min(y, canvasHeight - height))
+      placed.push({
+        ...it,
+        x,
+        y,
+        width,
+        height,
+      })
+    }
+  }
+
+  return placed
 }
 
 export type ExportFormat = 'image/jpeg' | 'image/png'

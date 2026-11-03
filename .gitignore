@@ -25,3 +25,7 @@ deploy-*.json
 *.njsproj
 *.sln
 *.sw?
+
+.vercel
+.env*
+!.env.example

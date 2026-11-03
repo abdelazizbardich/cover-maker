@@ -1,7 +1,7 @@
 /** Persist the user's default mockup photo in IndexedDB for reuse across sessions. */
 
 const DB_NAME = 'cover-maker'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const STORE = 'mockup'
 const DEFAULT_KEY = 'default'
 
@@ -18,6 +18,9 @@ function openDb(): Promise<IDBDatabase> {
       const db = req.result
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE)
+      }
+      if (!db.objectStoreNames.contains('listingCopy')) {
+        db.createObjectStore('listingCopy')
       }
     }
     req.onsuccess = () => resolve(req.result)

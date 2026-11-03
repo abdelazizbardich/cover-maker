@@ -202,43 +202,49 @@ export async function exportEtsyListingVideo(
     }
   })
 
-  recorder.start(200)
+  recorder.start(100)
 
-  let elapsed = 0
-  let slideIndex = 0
-  let slideElapsed = 0
+  // MediaRecorder + captureStream record wall-clock time. Drive slides from
+  // performance.now() so a busy main thread cannot stretch 10s into ~1min.
+  const slideEnds: number[] = []
+  {
+    let acc = 0
+    for (const d of durations) {
+      acc += d
+      slideEnds.push(acc)
+    }
+  }
 
+  const slideAt = (elapsedMs: number): number => {
+    for (let i = 0; i < slideEnds.length; i++) {
+      if (elapsedMs < slideEnds[i]) return i
+    }
+    return frames.length - 1
+  }
+
+  const startedAt = performance.now()
   await new Promise<void>((resolve) => {
     const tick = () => {
-      if (slideIndex >= frames.length) {
+      const elapsed = performance.now() - startedAt
+      if (elapsed >= totalMs) {
+        ctx.drawImage(frames[frames.length - 1], 0, 0)
         opts?.onProgress?.(1)
         resolve()
         return
       }
 
-      ctx.drawImage(frames[slideIndex], 0, 0)
-      slideElapsed += frameMs
-      elapsed += frameMs
+      // Redraw every tick so captureStream keeps emitting frames for still slides
+      ctx.drawImage(frames[slideAt(elapsed)], 0, 0)
       opts?.onProgress?.(Math.min(0.99, elapsed / totalMs))
 
-      if (slideElapsed >= durations[slideIndex]) {
-        slideElapsed = 0
-        slideIndex += 1
-      }
-
-      if (slideIndex >= frames.length) {
-        opts?.onProgress?.(1)
-        resolve()
-        return
-      }
-
-      window.setTimeout(tick, frameMs)
+      const nextFrameAt = startedAt + Math.floor(elapsed / frameMs + 1) * frameMs
+      window.setTimeout(tick, Math.max(0, nextFrameAt - performance.now()))
     }
     tick()
   })
 
-  // Hold last frame a beat so the recorder flushes cleanly
-  await new Promise((r) => setTimeout(r, 120))
+  // Brief hold so the last frame is captured; keep under ~150ms so length stays accurate
+  await new Promise((r) => setTimeout(r, 80))
   if (recorder.state !== 'inactive') recorder.stop()
 
   const blob = await stopped
